@@ -1,3 +1,4 @@
+# Cell 1: Import Required Libraries
 import os
 import csv
 import requests
@@ -5,10 +6,11 @@ import time
 from pathlib import Path
 from datetime import datetime
 
-# VirusTotal API Configuration
+# Cell 2: VirusTotal API Configuration
 VT_API_KEY = "YOUR_VIRUSTOTAL_API_KEY_HERE"
 VT_API_URL = "https://www.virustotal.com/api/v3/files/"
 
+# Cell 3: Function to Query VirusTotal
 def get_vt_hashes(md5_hash):
     """
     Query VirusTotal API to get SHA1 and SHA256 for a given MD5 hash.
@@ -42,6 +44,7 @@ def get_vt_hashes(md5_hash):
     # Rate limiting: VirusTotal free tier allows 4 requests per minute
     time.sleep(15)  # 15 seconds between requests = 4 per minute
 
+# Cell 4: Function to Process Mandiant CSV Files
 def process_mandiant_csv(file_path):
     """
     Process a Mandiant CSV file and extract IOCs.
@@ -54,7 +57,7 @@ def process_mandiant_csv(file_path):
             reader = csv.DictReader(f)
             
             for row in reader:
-                indicator_value = row.get('Indicator', '').strip()
+                indicator_value = row.get('Indicator Value', '').strip()
                 indicator_type = row.get('Indicator Type', '').strip()
                 
                 if not indicator_value or not indicator_type:
@@ -101,6 +104,7 @@ def process_mandiant_csv(file_path):
     
     return iocs
 
+# Cell 5: Main Function to Compile All IOCs
 def compile_iocs(folder_path, output_file):
     """
     Main function to compile all IOCs from CSV files in a folder.
@@ -137,6 +141,7 @@ def compile_iocs(folder_path, output_file):
     else:
         print("\nNo IOCs found to compile")
 
+# Cell 6: Configuration and Execution
 if __name__ == "__main__":
     # Configuration
     IOC_FOLDER = "./ioc_folder"  # Change this to your IOC folder path
