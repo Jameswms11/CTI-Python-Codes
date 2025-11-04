@@ -10,6 +10,13 @@ from datetime import datetime
 VT_API_KEY = "YOUR_VIRUSTOTAL_API_KEY_HERE"
 VT_API_URL = "https://www.virustotal.com/api/v3/files/"
 
+# Password for protected Excel file (if using .xlsx format)
+EXCEL_PASSWORD = "YOUR_PASSWORD_HERE"  # Enter your password here
+
+# Master IOC file configuration
+USE_EXISTING_MASTER = True  # Set to True to append to existing file
+MASTER_IOC_FILE = "master_iocs.csv"  # Path to your existing formatted file
+
 # Cell 3: Function to Query VirusTotal
 def get_vt_hashes(md5_hash):
     """
@@ -53,12 +60,26 @@ def process_mandiant_csv(file_path):
     iocs = []
     
     try:
+        # Check file permissions
+        if not os.access(file_path, os.R_OK):
+            print(f"  ERROR: No read permission for {file_path}")
+            return iocs
+        
         with open(file_path, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             
+            # Debug: Print column headers
+            print(f"  Mandiant column headers found: {reader.fieldnames}")
+            
+            row_count = 0
             for row in reader:
+                row_count += 1
                 indicator_value = row.get('Indicator Value', '').strip()
                 indicator_type = row.get('Indicator Type', '').strip()
+                
+                # Debug: Print first row data
+                if row_count == 1:
+                    print(f"  First row - Indicator Value: '{indicator_value}', Type: '{indicator_type}'")
                 
                 if not indicator_value or not indicator_type:
                     continue
@@ -88,7 +109,7 @@ def process_mandiant_csv(file_path):
                             sha1_entry = ioc_entry.copy()
                             sha1_entry['IOC'] = vt_data['sha1']
                             sha1_entry['Type:'] = 'SHA1'
-                            sha1_entry['Association:'] = f"Associated with MD5: {indicator_value}"
+                            sha1_entry['Association:'] = ''
                             iocs.append(sha1_entry)
                         
                         # Add SHA256 entry
@@ -96,11 +117,91 @@ def process_mandiant_csv(file_path):
                             sha256_entry = ioc_entry.copy()
                             sha256_entry['IOC'] = vt_data['sha256']
                             sha256_entry['Type:'] = 'SHA256'
-                            sha256_entry['Association:'] = f"Associated with MD5: {indicator_value}"
+                            sha256_entry['Association:'] = ''
                             iocs.append(sha256_entry)
+            
+            print(f"  Total rows processed: {row_count}, IOCs extracted: {len(iocs)}")
     
+    except PermissionError as e:
+        print(f"  PERMISSION ERROR reading {file_path}: {e}")
     except Exception as e:
-        print(f"Error processing {file_path}: {e}")
+        print(f"  ERROR processing {file_path}: {e}")
+    
+    return iocs
+
+# Cell 4b: Function to Process CrowdStrike CSV Files
+def process_crowdstrike_csv(file_path):
+    """
+    Process a CrowdStrike CSV file and extract IOCs.
+    Returns a list of IOC dictionaries.
+    """
+    iocs = []
+    
+    # Mapping of CrowdStrike types to standardized types
+    type_mapping = {
+        'domain': 'DOMAIN',
+        'ip_address': 'IPV4',
+        'url': 'URL',
+        'hash_sha1': 'SHA1',
+        'hash_md5': 'MD5',
+        'hash_sha256': 'SHA256',
+        'email': 'EMAIL'
+    }
+    
+    try:
+        # Check file permissions
+        if not os.access(file_path, os.R_OK):
+            print(f"  ERROR: No read permission for {file_path}")
+            return iocs
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            
+            # Debug: Print column headers
+            print(f"  CrowdStrike column headers found: {reader.fieldnames}")
+            
+            row_count = 0
+            for row in reader:
+                row_count += 1
+                
+                # Try different case variations for column names
+                indicator_value = (row.get('indicator', '') or row.get('Indicator', '') or 
+                                 row.get('INDICATOR', '')).strip()
+                indicator_type = (row.get('type', '') or row.get('Type', '') or 
+                                row.get('TYPE', '')).strip()
+                
+                # Debug: Print first few rows data
+                if row_count <= 3:
+                    print(f"  Row {row_count} - Indicator: '{indicator_value}', type: '{indicator_type}'")
+                
+                if not indicator_value or not indicator_type:
+                    if row_count <= 3:
+                        print(f"  Row {row_count} - SKIPPED (missing indicator or type)")
+                    continue
+                
+                # Convert CrowdStrike type to standardized type
+                standardized_type = type_mapping.get(indicator_type.lower(), indicator_type.upper())
+                
+                # Base IOC entry
+                ioc_entry = {
+                    'TLP:': 'TLP: AMBER+STRICT',
+                    'Classification:': 'UNCLASSIFIED',
+                    'IOC': indicator_value,
+                    'Association:': '',
+                    'Type:': standardized_type,
+                    'Note:': '',
+                    'Source:': os.path.basename(file_path),
+                    'Date:': datetime.now().strftime('%Y-%m-%d')
+                }
+                
+                iocs.append(ioc_entry)
+            
+            print(f"  Total rows processed: {row_count}, IOCs extracted: {len(iocs)}")
+    
+    except PermissionError as e:
+        print(f"  PERMISSION ERROR reading {file_path}: {e}")
+    except Exception as e:
+        print(f"  ERROR processing {file_path}: {e}")
     
     return iocs
 
@@ -113,23 +214,59 @@ def compile_iocs(folder_path, output_file):
     all_iocs = []
     
     # Find all CSV files matching Mandiant format (25-XXXXXXXX)
-    csv_files = list(folder.glob("25-*.csv"))
+    mandiant_files = list(folder.glob("25-*.csv"))
     
-    if not csv_files:
-        print(f"No Mandiant CSV files found in {folder_path}")
+    # Find all CrowdStrike CSV files (CSA-XXXXXX or CSIT-XXXXX)
+    csa_files = list(folder.glob("CSA-*.csv"))
+    csit_files = list(folder.glob("CSIT-*.csv"))
+    crowdstrike_files = csa_files + csit_files
+    
+    total_files = len(mandiant_files) + len(crowdstrike_files)
+    
+    if total_files == 0:
+        print(f"No IOC CSV files found in {folder_path}")
         return
     
-    print(f"Found {len(csv_files)} Mandiant CSV file(s)")
+    print(f"Found {len(mandiant_files)} Mandiant file(s) and {len(crowdstrike_files)} CrowdStrike file(s)")
     
-    # Process each CSV file
-    for csv_file in csv_files:
-        print(f"\nProcessing: {csv_file.name}")
+    # Process Mandiant CSV files
+    for csv_file in mandiant_files:
+        print(f"\nProcessing Mandiant file: {csv_file.name}")
         iocs = process_mandiant_csv(csv_file)
+        all_iocs.extend(iocs)
+        print(f"Extracted {len(iocs)} IOCs from {csv_file.name}")
+    
+    # Process CrowdStrike CSV files
+    for csv_file in crowdstrike_files:
+        print(f"\nProcessing CrowdStrike file: {csv_file.name}")
+        iocs = process_crowdstrike_csv(csv_file)
         all_iocs.extend(iocs)
         print(f"Extracted {len(iocs)} IOCs from {csv_file.name}")
     
     # Write compiled IOCs to output file
     if all_iocs:
+        # Check if we should append to existing master file
+        if USE_EXISTING_MASTER and os.path.exists(MASTER_IOC_FILE):
+            print(f"\n📋 Loading existing master file: {MASTER_IOC_FILE}")
+            existing_iocs = load_existing_master(MASTER_IOC_FILE)
+            print(f"Found {len(existing_iocs)} existing IOCs in master file")
+            
+            # Combine existing and new IOCs
+            combined_iocs = existing_iocs + all_iocs
+            
+            # Remove duplicates based on IOC value (keep first occurrence)
+            seen = set()
+            unique_iocs = []
+            for ioc in combined_iocs:
+                ioc_value = ioc.get('IOC', '')
+                if ioc_value and ioc_value not in seen:
+                    seen.add(ioc_value)
+                    unique_iocs.append(ioc)
+            
+            print(f"After deduplication: {len(unique_iocs)} total unique IOCs")
+            all_iocs = unique_iocs
+            output_file = MASTER_IOC_FILE
+        
         fieldnames = ['TLP:', 'Classification:', 'IOC', 'Association:', 'Type:', 'Note:', 'Source:', 'Date:']
         
         with open(output_file, 'w', newline='', encoding='utf-8') as f:
@@ -141,16 +278,144 @@ def compile_iocs(folder_path, output_file):
     else:
         print("\nNo IOCs found to compile")
 
+def load_existing_master(master_file):
+    """
+    Load IOCs from existing master file.
+    Supports both CSV and password-protected Excel files.
+    Headers are expected on row 3 (index 2).
+    """
+    existing_iocs = []
+    
+    try:
+        file_ext = os.path.splitext(master_file)[1].lower()
+        
+        if file_ext == '.csv':
+            # Load from CSV with headers on row 3
+            with open(master_file, 'r', encoding='utf-8') as f:
+                # Skip first 2 rows
+                next(f)
+                next(f)
+                
+                # Now read with headers on row 3
+                reader = csv.DictReader(f)
+                for row in reader:
+                    existing_iocs.append(row)
+        
+        elif file_ext in ['.xlsx', '.xls']:
+            # Load from password-protected Excel
+            try:
+                import msoffcrypto
+                import io
+                
+                # Open encrypted file
+                encrypted_file = open(master_file, 'rb')
+                
+                # Create a decrypted file object
+                decrypted = io.BytesIO()
+                
+                # Decrypt the file
+                office_file = msoffcrypto.OfficeFile(encrypted_file)
+                office_file.load_key(password=EXCEL_PASSWORD)
+                office_file.decrypt(decrypted)
+                
+                # Read decrypted Excel with pandas (headers on row 3 = index 2)
+                import pandas as pd
+                decrypted.seek(0)
+                df = pd.read_excel(decrypted, header=2)  # Row 3 (0-indexed as 2)
+                
+                # Convert to list of dictionaries
+                for _, row in df.iterrows():
+                    existing_iocs.append(row.to_dict())
+                
+                encrypted_file.close()
+                
+            except ImportError:
+                print("⚠ WARNING: msoffcrypto-tool and pandas not installed")
+                print("Install with: pip install msoffcrypto-tool pandas openpyxl")
+                print("Skipping master file load...")
+            except Exception as e:
+                print(f"⚠ WARNING: Could not load Excel file: {e}")
+                print("Check password or file corruption. Continuing without master file...")
+        
+        else:
+            print(f"⚠ WARNING: Unsupported master file format: {file_ext}")
+            print("Supported formats: .csv, .xlsx, .xls")
+    
+    except FileNotFoundError:
+        print(f"Master file not found: {master_file}")
+    except Exception as e:
+        print(f"Error loading master file: {e}")
+    
+    return existing_iocs
+
 # Cell 6: Configuration and Execution
 if __name__ == "__main__":
     # Configuration
     IOC_FOLDER = "./ioc_folder"  # Change this to your IOC folder path
     OUTPUT_FILE = "compiled_iocs.csv"
     
+    print("="*60)
+    print("IOC Compiler Script Starting")
+    print("="*60)
+    
+    # Check if folder exists
+    if not os.path.exists(IOC_FOLDER):
+        print(f"ERROR: Folder '{IOC_FOLDER}' does not exist!")
+        print("Please create the folder or update IOC_FOLDER path in the script.")
+        exit(1)
+    
+    # Check if folder is accessible
+    if not os.access(IOC_FOLDER, os.R_OK):
+        print(f"ERROR: No read permission for folder '{IOC_FOLDER}'")
+        print("Please check folder permissions.")
+        exit(1)
+    
+    # Check if output file location is writable
+    output_dir = os.path.dirname(OUTPUT_FILE) or "."
+    if not os.access(output_dir, os.W_OK):
+        print(f"ERROR: No write permission for output location '{output_dir}'")
+        print("Please check folder permissions or change OUTPUT_FILE path.")
+        exit(1)
+    
+    # Validate master file settings
+    if USE_EXISTING_MASTER:
+        print(f"📋 Master file mode ENABLED")
+        print(f"   Master file: {MASTER_IOC_FILE}")
+        if os.path.exists(MASTER_IOC_FILE):
+            print(f"   Status: File found - will append new IOCs")
+        else:
+            print(f"   Status: File not found - will create new master file")
+        
+        # Check if password is needed for Excel files
+        if MASTER_IOC_FILE.endswith(('.xlsx', '.xls')):
+            if EXCEL_PASSWORD == "YOUR_PASSWORD_HERE":
+                print(f"   ⚠ WARNING: Excel password not set!")
+                print(f"   Please set EXCEL_PASSWORD in Cell 2 of the script")
+            else:
+                print(f"   Password: ✓ Set")
+    else:
+        print(f"📋 Standard mode - will create: {OUTPUT_FILE}")
+    
+    print("-"*60)
+    
     # Validate VirusTotal API key is set
     if VT_API_KEY == "YOUR_VIRUSTOTAL_API_KEY_HERE":
-        print("⚠ WARNING: Please set your VirusTotal API key in the VT_API_KEY variable")
+        print("⚠ WARNING: VirusTotal API key not set")
+        print("MD5 hashes will NOT be enriched with SHA1/SHA256")
         print("You can get a free API key at: https://www.virustotal.com/gui/join-us")
+        print("-"*60)
     
     # Run the compiler
-    compile_iocs(IOC_FOLDER, OUTPUT_FILE)
+    try:
+        compile_iocs(IOC_FOLDER, OUTPUT_FILE)
+    except PermissionError as e:
+        print(f"\n❌ PERMISSION ERROR: {e}")
+        print(f"File or folder access denied. Please check:")
+        print(f"  1. Close any programs that might have the files open (Excel, etc.)")
+        print(f"  2. Check folder permissions")
+        print(f"  3. Ensure output file is not open in another program")
+    except Exception as e:
+        print(f"\n❌ UNEXPECTED ERROR: {e}")
+        print(f"Error type: {type(e).__name__}")
+        import traceback
+        traceback.print_exc()
