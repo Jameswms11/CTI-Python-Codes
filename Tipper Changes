@@ -1,0 +1,301 @@
+# =============================================================================
+# CELL 7.5: Define IOC Processing Functions for DCNDC Tipper
+# =============================================================================
+print("\nCELL 7.5: Defining DCNDC Tipper IOC Processing Functions")
+print("=" * 50)
+
+def process_dcndc_tipper_csv(file_path):
+    """
+    Process DCNDC Tipper CSV file (contains "DCNDC Tipper T-" in filename).
+    Extracts domains from "(U) Domain/Subdomain" column and IPs from "(U) Associated IP Address" column.
+    Associates all IOCs with DPRK.
+    """
+    iocs = []
+    seen_iocs = set()  # Track unique IOCs to avoid duplicates
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            reader = csv.DictReader(f)
+            
+            print(f"  Processing: {os.path.basename(file_path)}")
+            if reader.fieldnames:
+                print(f"  Columns found: {len(reader.fieldnames)}")
+                # Show relevant columns if they exist
+                relevant_cols = [col for col in reader.fieldnames 
+                               if 'Domain' in col or 'IP' in col]
+                if relevant_cols:
+                    print(f"  Relevant columns: {', '.join(relevant_cols[:5])}...")
+            
+            domain_count = 0
+            ip_count = 0
+            duplicate_count = 0
+            
+            for row in reader:
+                # Extract domains from "(U) Domain/Subdomain" column
+                domain_value = row.get('(U) Domain/Subdomain', '').strip()
+                if not domain_value:
+                    # Try alternative column names
+                    domain_value = row.get('Domain/Subdomain', '').strip()
+                    if not domain_value:
+                        domain_value = row.get('Domain', '').strip()
+                
+                if domain_value:
+                    # Create unique key for deduplication
+                    ioc_key = f"DOMAIN:{domain_value.lower()}"
+                    
+                    if ioc_key not in seen_iocs:
+                        seen_iocs.add(ioc_key)
+                        ioc_entry = {
+                            'TLP:': DEFAULT_TLP,
+                            'Classification:': DEFAULT_CLASSIFICATION,
+                            'IOC': domain_value,
+                            'Association:': 'DPRK',
+                            'Type:': 'DOMAIN',
+                            'Note:': 'DCNDC Tipper - Domain/Subdomain',
+                            'Source:': os.path.basename(file_path),
+                            'Date:': datetime.now().strftime('%Y-%m-%d')
+                        }
+                        iocs.append(ioc_entry)
+                        domain_count += 1
+                    else:
+                        duplicate_count += 1
+                
+                # Extract IPs from "(U) Associated IP Address" column
+                ip_value = row.get('(U) Associated IP Address', '').strip()
+                if not ip_value:
+                    # Try alternative column names
+                    ip_value = row.get('(U Associated IP Address)', '').strip()
+                    if not ip_value:
+                        ip_value = row.get('Associated IP Address', '').strip()
+                        if not ip_value:
+                            ip_value = row.get('IP Address', '').strip()
+                
+                if ip_value:
+                    # Handle multiple IPs in one cell (comma or semicolon separated)
+                    ip_list = []
+                    if ',' in ip_value:
+                        ip_list = [ip.strip() for ip in ip_value.split(',')]
+                    elif ';' in ip_value:
+                        ip_list = [ip.strip() for ip in ip_value.split(';')]
+                    else:
+                        ip_list = [ip_value]
+                    
+                    for ip in ip_list:
+                        if ip and is_valid_ip(ip):  # Validate IP format
+                            # Create unique key for deduplication
+                            ioc_key = f"IP:{ip}"
+                            
+                            if ioc_key not in seen_iocs:
+                                seen_iocs.add(ioc_key)
+                                ioc_entry = {
+                                    'TLP:': DEFAULT_TLP,
+                                    'Classification:': DEFAULT_CLASSIFICATION,
+                                    'IOC': ip,
+                                    'Association:': 'DPRK',
+                                    'Type:': 'IPV4',
+                                    'Note:': 'DCNDC Tipper - Associated IP',
+                                    'Source:': os.path.basename(file_path),
+                                    'Date:': datetime.now().strftime('%Y-%m-%d')
+                                }
+                                iocs.append(ioc_entry)
+                                ip_count += 1
+                            else:
+                                duplicate_count += 1
+        
+        print(f"  ✓ Extracted {len(iocs)} unique IOCs")
+        print(f"    - Domains: {domain_count}")
+        print(f"    - IPs: {ip_count}")
+        if duplicate_count > 0:
+            print(f"    - Duplicates removed: {duplicate_count}")
+        
+    except Exception as e:
+        print(f"  ✗ Error processing {file_path}: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return iocs
+
+def is_valid_ip(ip_string):
+    """
+    Validate IPv4 address format.
+    """
+    import re
+    # IPv4 pattern
+    ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+    
+    if not re.match(ipv4_pattern, ip_string):
+        return False
+    
+    # Check each octet is 0-255
+    octets = ip_string.split('.')
+    for octet in octets:
+        try:
+            if not 0 <= int(octet) <= 255:
+                return False
+        except ValueError:
+            return False
+    
+    return True
+
+print("✓ DCNDC Tipper processing functions defined")
+
+# =============================================================================
+# CELL 9: Scan for IOC Files
+# =============================================================================
+print("\nCELL 9: Scanning for IOC Files")
+print("=" * 50)
+
+# Initialize file lists
+mandiant_files = []
+crowdstrike_files = []
+dcndc_tipper_files = []
+other_files = []
+
+if os.path.exists(IOC_SOURCE_FOLDER):
+    folder = Path(IOC_SOURCE_FOLDER)
+    
+    # Find Mandiant files (25-*.csv)
+    mandiant_files = list(folder.glob("25-*.csv"))
+    
+    # Find CrowdStrike files (CSA-*.csv or CSIT-*.csv)
+    crowdstrike_files = (list(folder.glob("CSA-*.csv")) + 
+                         list(folder.glob("CSIT-*.csv")))
+    
+    # Find DCNDC Tipper files (contains "DCNDC Tipper T-" in filename)
+    all_csv = list(folder.glob("*.csv"))
+    dcndc_tipper_files = []
+    for f in all_csv:
+        if "DCNDC Tipper T-" in f.name:
+            dcndc_tipper_files.append(f)
+    
+    # Find other CSV files
+    identified_files = mandiant_files + crowdstrike_files + dcndc_tipper_files
+    other_files = [f for f in all_csv if f not in identified_files]
+    
+    # Report findings
+    print(f"\nMandiant Files Found: {len(mandiant_files)}")
+    for f in mandiant_files:
+        print(f"  • {f.name}")
+    
+    print(f"\nCrowdStrike Files Found: {len(crowdstrike_files)}")
+    for f in crowdstrike_files:
+        print(f"  • {f.name}")
+    
+    print(f"\nDCNDC Tipper Files Found: {len(dcndc_tipper_files)}")
+    for f in dcndc_tipper_files:
+        print(f"  • {f.name}")
+    
+    if other_files:
+        print(f"\nOther CSV Files (will be skipped): {len(other_files)}")
+        for f in other_files[:5]:
+            print(f"  • {f.name}")
+        if len(other_files) > 5:
+            print(f"  ... and {len(other_files) - 5} more")
+    
+    total_files = len(mandiant_files) + len(crowdstrike_files) + len(dcndc_tipper_files)
+    print(f"\nTotal IOC files to process: {total_files}")
+    
+    if total_files == 0:
+        print("\n⚠ No recognized IOC files found!")
+        print("  Expected patterns:")
+        print("    - Mandiant: 25-*.csv")
+        print("    - CrowdStrike: CSA-*.csv, CSIT-*.csv")
+        print("    - DCNDC Tipper: *DCNDC Tipper T-*.csv")
+else:
+    print(f"✗ IOC source folder does not exist: {IOC_SOURCE_FOLDER}")
+
+# =============================================================================
+# CELL 10: Extract IOCs from All Files
+# =============================================================================
+print("\nCELL 10: Extracting IOCs from Files")
+print("=" * 50)
+
+all_iocs = []
+global_seen_iocs = set()  # Global deduplication across all sources
+
+def add_unique_iocs(iocs_list, new_iocs):
+    """
+    Add only unique IOCs to the main list, checking across all sources.
+    """
+    added_count = 0
+    duplicate_count = 0
+    
+    for ioc in new_iocs:
+        # Create a unique key based on IOC value and type
+        ioc_key = f"{ioc.get('Type:', '')}:{ioc.get('IOC', '').lower()}"
+        
+        if ioc_key not in global_seen_iocs:
+            global_seen_iocs.add(ioc_key)
+            iocs_list.append(ioc)
+            added_count += 1
+        else:
+            duplicate_count += 1
+    
+    return added_count, duplicate_count
+
+# Process Mandiant files
+if mandiant_files:
+    print("\nProcessing Mandiant files:")
+    for csv_file in mandiant_files:
+        iocs = process_mandiant_csv(str(csv_file))
+        added, dupes = add_unique_iocs(all_iocs, iocs)
+        if dupes > 0:
+            print(f"    Added {added} unique IOCs ({dupes} duplicates skipped)")
+        
+        # Add VirusTotal enrichment for MD5 hashes if enabled
+        if VT_API_KEY:
+            md5_iocs = [ioc for ioc in iocs if ioc.get('Type:', '').upper() == 'MD5']
+            for md5_ioc in md5_iocs:
+                enriched = enrich_md5_with_virustotal(md5_ioc['IOC'], md5_ioc)
+                add_unique_iocs(all_iocs, enriched)
+
+# Process CrowdStrike files
+if crowdstrike_files:
+    print("\nProcessing CrowdStrike files:")
+    for csv_file in crowdstrike_files:
+        iocs = process_crowdstrike_csv(str(csv_file))
+        added, dupes = add_unique_iocs(all_iocs, iocs)
+        if dupes > 0:
+            print(f"    Added {added} unique IOCs ({dupes} duplicates skipped)")
+
+# Process DCNDC Tipper files
+if dcndc_tipper_files:
+    print("\nProcessing DCNDC Tipper files:")
+    for csv_file in dcndc_tipper_files:
+        iocs = process_dcndc_tipper_csv(str(csv_file))
+        added, dupes = add_unique_iocs(all_iocs, iocs)
+        if dupes > 0:
+            print(f"    Added {added} unique IOCs ({dupes} duplicates skipped)")
+
+print(f"\n✓ Total unique IOCs extracted: {len(all_iocs)}")
+print(f"  Total duplicates removed: {len(global_seen_iocs) - len(all_iocs)}")
+
+# Show IOC type distribution
+if all_iocs:
+    type_counts = {}
+    association_counts = {}
+    
+    for ioc in all_iocs:
+        ioc_type = ioc.get('Type:', 'Unknown')
+        type_counts[ioc_type] = type_counts.get(ioc_type, 0) + 1
+        
+        association = ioc.get('Association:', 'Unknown')
+        if association:
+            association_counts[association] = association_counts.get(association, 0) + 1
+    
+    print("\nIOC Types Distribution:")
+    for ioc_type, count in sorted(type_counts.items()):
+        print(f"  • {ioc_type}: {count}")
+    
+    print("\nAssociation Distribution:")
+    for association, count in sorted(association_counts.items()):
+        if association:  # Only show non-empty associations
+            print(f"  • {association}: {count}")
+    
+    # Show sample IOC
+    print("\nSample IOC entry:")
+    sample = all_iocs[0]
+    for key, value in sample.items():
+        print(f"  {key} {value}")
+else:
+    print("\n⚠ No IOCs were extracted")
