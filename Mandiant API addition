@@ -1,0 +1,246 @@
+# Mandiant API Configuration
+MANDIANT_API_KEY = "your_mandiant_api_key"  # Your Mandiant Advantage API Key
+MANDIANT_API_SECRET = "your_mandiant_api_secret"  # Your Mandiant API Secret
+MANDIANT_API_BASE_URL = "https://api.intelligence.mandiant.com"
+MANDIANT_AUTH_URL = "https://api.intelligence.mandiant.com/token"
+MANDIANT_API_ENABLED = True  # Set to False to skip API calls
+
+
+# =============================================================================
+# CELL 5.5: Define Mandiant API Functions
+# =============================================================================
+print("\nCELL 5.5: Defining Mandiant API Functions")
+print("=" * 50)
+
+import base64
+import json
+
+# Global cache for Mandiant reports to avoid duplicate API calls
+mandiant_report_cache = {}
+mandiant_access_token = None
+mandiant_token_expiry = 0
+
+def get_mandiant_access_token():
+    """
+    Get Mandiant API access token using client credentials.
+    """
+    global mandiant_access_token, mandiant_token_expiry
+    
+    if not MANDIANT_API_ENABLED or not MANDIANT_API_KEY or not MANDIANT_API_SECRET:
+        return None
+    
+    # Check if we have a valid cached token
+    current_time = time.time()
+    if mandiant_access_token and current_time < mandiant_token_expiry:
+        return mandiant_access_token
+    
+    try:
+        print("  Authenticating with Mandiant API...")
+        
+        # Prepare authentication
+        auth_string = f"{MANDIANT_API_KEY}:{MANDIANT_API_SECRET}"
+        auth_bytes = auth_string.encode('ascii')
+        auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+        
+        headers = {
+            "Authorization": f"Basic {auth_b64}",
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        
+        data = {"grant_type": "client_credentials"}
+        
+        response = requests.post(MANDIANT_AUTH_URL, headers=headers, data=data)
+        
+        if response.status_code == 200:
+            token_data = response.json()
+            mandiant_access_token = token_data.get("access_token")
+            expires_in = token_data.get("expires_in", 3600)
+            mandiant_token_expiry = current_time + expires_in - 60  # Refresh 1 min early
+            print(f"  ✓ Authentication successful (token valid for {expires_in}s)")
+            return mandiant_access_token
+        else:
+            print(f"  ✗ Authentication failed: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        print(f"  ✗ Error getting Mandiant access token: {e}")
+        return None
+
+def get_mandiant_report_details(report_id):
+    """
+    Fetch report title and URL from Mandiant API for a given report ID.
+    Returns: dict with 'title' and 'url' keys, or None if failed
+    """
+    if not MANDIANT_API_ENABLED:
+        return None
+    
+    # Check cache first
+    if report_id in mandiant_report_cache:
+        print(f"    Using cached data for report {report_id}")
+        return mandiant_report_cache[report_id]
+    
+    # Get access token
+    access_token = get_mandiant_access_token()
+    if not access_token:
+        return None
+    
+    try:
+        # Construct API endpoint for report
+        # Note: The exact endpoint may vary based on Mandiant's API version
+        # Common endpoints include:
+        # /v4/report/{report_id}
+        # /v4/reports/{report_id}
+        # /v3/reports/{report_id}
+        
+        url = f"{MANDIANT_API_BASE_URL}/v4/report/{report_id}"
+        
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "X-App-Name": "IOC-Processor"  # Some APIs require app identification
+        }
+        
+        print(f"    Fetching report {report_id} from Mandiant API...")
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Extract title and URL from response
+            # Note: Field names may vary based on API version
+            report_details = {
+                'title': data.get('title', '') or data.get('report_title', '') or data.get('name', ''),
+                'url': data.get('url', '') or data.get('report_url', '') or f"https://advantage.mandiant.com/reports/{report_id}"
+            }
+            
+            # Cache the result
+            mandiant_report_cache[report_id] = report_details
+            
+            print(f"    ✓ Found: {report_details['title'][:50]}...")
+            return report_details
+            
+        elif response.status_code == 404:
+            print(f"    ⚠ Report {report_id} not found")
+            # Cache negative result to avoid repeated lookups
+            mandiant_report_cache[report_id] = {'title': '', 'url': ''}
+            return None
+        else:
+            print(f"    ✗ API request failed: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        print(f"    ✗ Error fetching report {report_id}: {e}")
+        return None
+
+def extract_report_id_from_filename(filename):
+    """
+    Extract Mandiant report ID from filename.
+    Expected format: 25-XXXXX-XX.csv or similar patterns
+    """
+    import re
+    
+    # Try different patterns for extracting report ID
+    patterns = [
+        r'25-(\d+-\d+)',  # Format: 25-12345-01
+        r'25-(\d+)',      # Format: 25-12345
+        r'(\d{2}-\d{5,}-\d{2})',  # Format: 25-12345-01 (full)
+        r'MAR-(\d+)',     # Format: MAR-12345
+        r'RPT-(\d+)',     # Format: RPT-12345
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, filename)
+        if match:
+            return match.group(1)
+    
+    # If no pattern matches, try using the whole filename minus extension
+    base_name = filename.replace('.csv', '').replace('25-', '')
+    return base_name if base_name else None
+
+print("✓ Mandiant API functions defined")
+if MANDIANT_API_ENABLED and MANDIANT_API_KEY != "your_mandiant_api_key":
+    print("  API integration enabled")
+else:
+    print("  ⚠ API integration disabled (configure API credentials to enable)")
+
+
+def process_mandiant_csv(file_path):
+    """
+    Process Mandiant CSV file (25-*.csv format).
+    Converts FQDN type to DOMAIN and fetches report details via API.
+    """
+    iocs = []
+    
+    # Extract report ID from filename
+    filename = os.path.basename(file_path)
+    report_id = extract_report_id_from_filename(filename)
+    
+    # Fetch report details from API
+    report_details = None
+    if report_id and MANDIANT_API_ENABLED:
+        report_details = get_mandiant_report_details(report_id)
+    
+    # Prepare the note text
+    if report_details and report_details.get('title'):
+        note_prefix = f"Mandiant Report {report_id}: {report_details['title']}"
+    elif report_id:
+        note_prefix = f"Mandiant Report {report_id}"
+    else:
+        note_prefix = "Mandiant Report"
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            reader = csv.DictReader(f)
+            
+            print(f"  Processing: {filename}")
+            if reader.fieldnames:
+                print(f"  Columns: {', '.join(reader.fieldnames[:5])}...")
+            if report_id:
+                print(f"  Report ID: {report_id}")
+            
+            for row in reader:
+                indicator_value = row.get('Indicator Value', '').strip()
+                indicator_type = row.get('Indicator Type', '').strip()
+                
+                if not indicator_value or not indicator_type:
+                    continue
+                
+                # Convert FQDN to DOMAIN
+                if indicator_type.upper() == 'FQDN':
+                    standardized_type = 'DOMAIN'
+                else:
+                    standardized_type = indicator_type.upper()
+                
+                # Combine report info with any existing note
+                existing_note = row.get('Note', '').strip()
+                if existing_note:
+                    combined_note = f"{note_prefix} - {existing_note}"
+                else:
+                    combined_note = note_prefix
+                
+                # Add URL to note if available
+                if report_details and report_details.get('url'):
+                    combined_note += f" | {report_details['url']}"
+                
+                ioc_entry = {
+                    'TLP:': DEFAULT_TLP,
+                    'Classification:': DEFAULT_CLASSIFICATION,
+                    'IOC': indicator_value,
+                    'Association:': row.get('Association', ''),
+                    'Type:': standardized_type,
+                    'Note:': combined_note,
+                    'Source:': filename,
+                    'Date:': datetime.now().strftime('%Y-%m-%d')
+                }
+                
+                iocs.append(ioc_entry)
+        
+        print(f"  ✓ Extracted {len(iocs)} IOCs")
+        
+    except Exception as e:
+        print(f"  ✗ Error processing {file_path}: {e}")
+    
+    return iocs
+
+
