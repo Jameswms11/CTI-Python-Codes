@@ -1,32 +1,41 @@
 # Mandiant API Configuration
-MANDIANT_API_KEY = "your_mandiant_api_key"  # Your Mandiant Advantage API Key
-MANDIANT_API_SECRET = "your_mandiant_api_secret"  # Your Mandiant API Secret
-MANDIANT_API_BASE_URL = "https://api.intelligence.mandiant.com"
-MANDIANT_AUTH_URL = "https://api.intelligence.mandiant.com/token"
+MANDIANT_API_KEY = "your_mandiant_api_key_here"  # Your Mandiant Advantage API Key
+MANDIANT_API_SECRET = "your_mandiant_api_secret_here"  # Your Mandiant API Secret
 MANDIANT_API_ENABLED = True  # Set to False to skip API calls
 
+# Mandiant API Endpoints
+MANDIANT_AUTH_URL = "https://api.intelligence.mandiant.com/token"
+MANDIANT_API_BASE_URL = "https://api.intelligence.mandiant.com"
 
 # =============================================================================
-# CELL 5.5: Define Mandiant API Functions
+# CELL 5.5: Define Mandiant API Functions with Threat Actor Support
 # =============================================================================
 print("\nCELL 5.5: Defining Mandiant API Functions")
 print("=" * 50)
 
 import base64
 import json
+import re
+from typing import Dict, Optional
 
-# Global cache for Mandiant reports to avoid duplicate API calls
-mandiant_report_cache = {}
+# Global variables for token management
 mandiant_access_token = None
 mandiant_token_expiry = 0
 
+# Cache for report details to avoid redundant API calls
+mandiant_report_cache = {}
+
 def get_mandiant_access_token():
     """
-    Get Mandiant API access token using client credentials.
+    Get Mandiant API access token using client credentials flow.
     """
     global mandiant_access_token, mandiant_token_expiry
     
-    if not MANDIANT_API_ENABLED or not MANDIANT_API_KEY or not MANDIANT_API_SECRET:
+    if not MANDIANT_API_ENABLED:
+        return None
+    
+    if MANDIANT_API_KEY == "your_mandiant_api_key_here":
+        print("  ⚠ Mandiant API credentials not configured")
         return None
     
     # Check if we have a valid cached token
@@ -50,144 +59,255 @@ def get_mandiant_access_token():
         
         data = {"grant_type": "client_credentials"}
         
-        response = requests.post(MANDIANT_AUTH_URL, headers=headers, data=data)
+        response = requests.post(MANDIANT_AUTH_URL, headers=headers, data=data, timeout=30)
         
         if response.status_code == 200:
             token_data = response.json()
             mandiant_access_token = token_data.get("access_token")
             expires_in = token_data.get("expires_in", 3600)
-            mandiant_token_expiry = current_time + expires_in - 60  # Refresh 1 min early
-            print(f"  ✓ Authentication successful (token valid for {expires_in}s)")
+            mandiant_token_expiry = current_time + expires_in - 60
+            print(f"  ✓ Authentication successful (token expires in {expires_in}s)")
             return mandiant_access_token
         else:
-            print(f"  ✗ Authentication failed: {response.status_code}")
+            print(f"  ✗ Authentication failed: HTTP {response.status_code}")
             return None
             
     except Exception as e:
         print(f"  ✗ Error getting Mandiant access token: {e}")
         return None
 
-def get_mandiant_report_details(report_id):
+def extract_report_id_from_filename(filename):
     """
-    Fetch report title and URL from Mandiant API for a given report ID.
-    Returns: dict with 'title' and 'url' keys, or None if failed
+    Extract report ID from Mandiant filename.
+    Examples: 25-00012345-01.csv → 25-00012345-01
     """
-    if not MANDIANT_API_ENABLED:
-        return None
+    # Remove file extension
+    base_name = filename.replace('.csv', '').replace('.CSV', '')
     
+    # Common Mandiant report ID patterns
+    patterns = [
+        r'(25-\d{8}-\d{2})',     # Format: 25-00012345-01
+        r'(25-\d{5,8})',         # Format: 25-12345
+        r'(MAR-\d{4}-\d{5})',    # Format: MAR-2024-12345
+        r'(M-\d{2}-\d{5})',      # Format: M-24-12345
+        r'(\d{2}-\d{5,8}-\d{2})', # Format: 24-12345-01
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, base_name, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    
+    return base_name
+
+def get_mandiant_report_details(report_id) -> Dict[str, str]:
+    """
+    Fetch report details from Mandiant API including title and threat actors.
+    Returns: dict with 'title', 'threat_actors', and 'url' keys
+    """
     # Check cache first
     if report_id in mandiant_report_cache:
-        print(f"    Using cached data for report {report_id}")
+        print(f"    Using cached details for report {report_id}")
         return mandiant_report_cache[report_id]
     
     # Get access token
     access_token = get_mandiant_access_token()
     if not access_token:
-        return None
+        return {'title': '', 'threat_actors': '', 'url': ''}
     
     try:
-        # Construct API endpoint for report
-        # Note: The exact endpoint may vary based on Mandiant's API version
-        # Common endpoints include:
-        # /v4/report/{report_id}
-        # /v4/reports/{report_id}
-        # /v3/reports/{report_id}
-        
-        url = f"{MANDIANT_API_BASE_URL}/v4/report/{report_id}"
+        # Try different API endpoints
+        endpoints = [
+            f"/v4/report/{report_id}",
+            f"/v4/reports/{report_id}",
+            f"/v4/indicator-reports/{report_id}",
+            f"/v3/reports/{report_id}"
+        ]
         
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
-            "X-App-Name": "IOC-Processor"  # Some APIs require app identification
+            "X-App-Name": "IOC-Processor"
         }
         
-        print(f"    Fetching report {report_id} from Mandiant API...")
-        response = requests.get(url, headers=headers)
+        for endpoint in endpoints:
+            try:
+                url = f"{MANDIANT_API_BASE_URL}{endpoint}"
+                print(f"    Fetching report {report_id} details...")
+                
+                response = requests.get(url, headers=headers, timeout=30)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Extract title
+                    title = (data.get('title') or 
+                            data.get('report_title') or 
+                            data.get('name') or 
+                            data.get('report_name', ''))
+                    
+                    # Extract threat actors
+                    threat_actors = extract_threat_actors(data)
+                    
+                    # Extract URL
+                    url = (data.get('url') or 
+                          data.get('report_url') or 
+                          f"https://advantage.mandiant.com/reports/{report_id}")
+                    
+                    # Prepare result
+                    report_details = {
+                        'title': title,
+                        'threat_actors': threat_actors,
+                        'url': url
+                    }
+                    
+                    # Cache the result
+                    mandiant_report_cache[report_id] = report_details
+                    
+                    print(f"    ✓ Found: {title[:50]}...")
+                    if threat_actors:
+                        print(f"    ✓ Threat Actors: {threat_actors}")
+                    
+                    return report_details
+                    
+                elif response.status_code == 404:
+                    continue
+                    
+            except Exception:
+                continue
         
-        if response.status_code == 200:
-            data = response.json()
-            
-            # Extract title and URL from response
-            # Note: Field names may vary based on API version
-            report_details = {
-                'title': data.get('title', '') or data.get('report_title', '') or data.get('name', ''),
-                'url': data.get('url', '') or data.get('report_url', '') or f"https://advantage.mandiant.com/reports/{report_id}"
-            }
-            
-            # Cache the result
-            mandiant_report_cache[report_id] = report_details
-            
-            print(f"    ✓ Found: {report_details['title'][:50]}...")
-            return report_details
-            
-        elif response.status_code == 404:
-            print(f"    ⚠ Report {report_id} not found")
-            # Cache negative result to avoid repeated lookups
-            mandiant_report_cache[report_id] = {'title': '', 'url': ''}
-            return None
-        else:
-            print(f"    ✗ API request failed: {response.status_code}")
-            return None
-            
+        # If we get here, report was not found
+        print(f"    ⚠ Report {report_id} not found")
+        empty_result = {'title': '', 'threat_actors': '', 'url': ''}
+        mandiant_report_cache[report_id] = empty_result
+        return empty_result
+        
     except Exception as e:
         print(f"    ✗ Error fetching report {report_id}: {e}")
-        return None
+        return {'title': '', 'threat_actors': '', 'url': ''}
 
-def extract_report_id_from_filename(filename):
+def extract_threat_actors(report_data):
     """
-    Extract Mandiant report ID from filename.
-    Expected format: 25-XXXXX-XX.csv or similar patterns
+    Extract threat actor names from Mandiant report data.
+    Handles various API response formats.
     """
-    import re
+    threat_actors = []
     
-    # Try different patterns for extracting report ID
-    patterns = [
-        r'25-(\d+-\d+)',  # Format: 25-12345-01
-        r'25-(\d+)',      # Format: 25-12345
-        r'(\d{2}-\d{5,}-\d{2})',  # Format: 25-12345-01 (full)
-        r'MAR-(\d+)',     # Format: MAR-12345
-        r'RPT-(\d+)',     # Format: RPT-12345
+    # Check different possible fields for threat actors
+    # Field names vary by API version
+    possible_fields = [
+        'threat_actors',
+        'actors',
+        'threat_actor',
+        'actor_name',
+        'attributed_to',
+        'attribution',
+        'tags'  # Sometimes actors are in tags
     ]
     
-    for pattern in patterns:
-        match = re.search(pattern, filename)
-        if match:
-            return match.group(1)
+    for field in possible_fields:
+        if field in report_data:
+            value = report_data[field]
+            
+            # Handle list of actors
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        # Actor might be nested object
+                        actor_name = (item.get('name') or 
+                                    item.get('actor_name') or 
+                                    item.get('display_name'))
+                        if actor_name:
+                            threat_actors.append(actor_name)
+                    elif isinstance(item, str):
+                        # Direct string value
+                        threat_actors.append(item)
+            
+            # Handle single actor string
+            elif isinstance(value, str) and value:
+                threat_actors.append(value)
+            
+            # Handle nested object
+            elif isinstance(value, dict):
+                actor_name = (value.get('name') or 
+                            value.get('actor_name') or 
+                            value.get('display_name'))
+                if actor_name:
+                    threat_actors.append(actor_name)
     
-    # If no pattern matches, try using the whole filename minus extension
-    base_name = filename.replace('.csv', '').replace('25-', '')
-    return base_name if base_name else None
+    # Check if actors are in metadata or attributes
+    if 'metadata' in report_data:
+        metadata_actors = extract_threat_actors(report_data['metadata'])
+        threat_actors.extend(metadata_actors)
+    
+    if 'attributes' in report_data:
+        attr_actors = extract_threat_actors(report_data['attributes'])
+        threat_actors.extend(attr_actors)
+    
+    # Remove duplicates and clean up
+    unique_actors = []
+    for actor in threat_actors:
+        # Clean actor name (remove APT prefix if standardizing)
+        cleaned = actor.strip()
+        if cleaned and cleaned not in unique_actors:
+            unique_actors.append(cleaned)
+    
+    # Join multiple actors with semicolon
+    return '; '.join(unique_actors) if unique_actors else ''
 
-print("✓ Mandiant API functions defined")
-if MANDIANT_API_ENABLED and MANDIANT_API_KEY != "your_mandiant_api_key":
-    print("  API integration enabled")
-else:
-    print("  ⚠ API integration disabled (configure API credentials to enable)")
+print("✓ Mandiant API functions with threat actor support defined")
+
+
+
 
 
 def process_mandiant_csv(file_path):
     """
     Process Mandiant CSV file (25-*.csv format).
-    Converts FQDN type to DOMAIN and fetches report details via API.
+    Fetches report title and threat actors via API.
     """
     iocs = []
     
-    # Extract report ID from filename
+    # Get filename and extract report ID
     filename = os.path.basename(file_path)
     report_id = extract_report_id_from_filename(filename)
     
+    # Initialize variables
+    mandiant_title = ""
+    threat_actors = ""
+    
     # Fetch report details from API
-    report_details = None
     if report_id and MANDIANT_API_ENABLED:
         report_details = get_mandiant_report_details(report_id)
+        mandiant_title = report_details.get('title', '')
+        threat_actors = report_details.get('threat_actors', '')
     
     # Prepare the note text
-    if report_details and report_details.get('title'):
-        note_prefix = f"Mandiant Report {report_id}: {report_details['title']}"
+    if mandiant_title:
+        note_text = f"MANDIANT: {report_id}: {mandiant_title}"
     elif report_id:
-        note_prefix = f"Mandiant Report {report_id}"
+        note_text = f"MANDIANT: {report_id}"
     else:
-        note_prefix = "Mandiant Report"
+        note_text = "MANDIANT Report"
+    
+    # Type standardization mapping
+    type_mapping = {
+        'FQDN': 'DOMAIN',
+        'HOSTNAME': 'DOMAIN',
+        'DNS': 'DOMAIN',
+        'IP': 'IPV4',
+        'IP ADDRESS': 'IPV4',
+        'IPV4 ADDRESS': 'IPV4',
+        'IPV6 ADDRESS': 'IPV6',
+        'MD5 HASH': 'MD5',
+        'SHA1 HASH': 'SHA1',
+        'SHA256 HASH': 'SHA256',
+        'EMAIL ADDRESS': 'EMAIL',
+        'URL': 'URL',
+        'URI': 'URL'
+    }
+    
+    conversion_stats = {}
     
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -196,8 +316,10 @@ def process_mandiant_csv(file_path):
             print(f"  Processing: {filename}")
             if reader.fieldnames:
                 print(f"  Columns: {', '.join(reader.fieldnames[:5])}...")
-            if report_id:
-                print(f"  Report ID: {report_id}")
+            if mandiant_title:
+                print(f"  Report Title: {mandiant_title[:60]}...")
+            if threat_actors:
+                print(f"  Threat Actors: {threat_actors}")
             
             for row in reader:
                 indicator_value = row.get('Indicator Value', '').strip()
@@ -206,28 +328,30 @@ def process_mandiant_csv(file_path):
                 if not indicator_value or not indicator_type:
                     continue
                 
-                # Convert FQDN to DOMAIN
-                if indicator_type.upper() == 'FQDN':
-                    standardized_type = 'DOMAIN'
-                else:
-                    standardized_type = indicator_type.upper()
+                # Standardize the type
+                original_type = indicator_type.upper()
+                standardized_type = type_mapping.get(original_type, original_type)
                 
-                # Combine report info with any existing note
+                # Track conversions
+                if original_type != standardized_type:
+                    conversion_key = f"{original_type} → {standardized_type}"
+                    conversion_stats[conversion_key] = conversion_stats.get(conversion_key, 0) + 1
+                
+                # Use threat actors for Association if found, otherwise use existing
+                association = threat_actors if threat_actors else row.get('Association', '')
+                
+                # Combine note with any existing note
                 existing_note = row.get('Note', '').strip()
                 if existing_note:
-                    combined_note = f"{note_prefix} - {existing_note}"
+                    combined_note = f"{note_text} | {existing_note}"
                 else:
-                    combined_note = note_prefix
-                
-                # Add URL to note if available
-                if report_details and report_details.get('url'):
-                    combined_note += f" | {report_details['url']}"
+                    combined_note = note_text
                 
                 ioc_entry = {
                     'TLP:': DEFAULT_TLP,
                     'Classification:': DEFAULT_CLASSIFICATION,
                     'IOC': indicator_value,
-                    'Association:': row.get('Association', ''),
+                    'Association:': association,  # Now includes threat actors
                     'Type:': standardized_type,
                     'Note:': combined_note,
                     'Source:': filename,
@@ -237,10 +361,20 @@ def process_mandiant_csv(file_path):
                 iocs.append(ioc_entry)
         
         print(f"  ✓ Extracted {len(iocs)} IOCs")
+        if mandiant_title:
+            print(f"  ✓ Report title stored in variable: mandiant_title")
+        
+        # Report type conversions
+        if conversion_stats:
+            print(f"  Type conversions performed:")
+            for conversion, count in conversion_stats.items():
+                print(f"    - {conversion}: {count} entries")
         
     except Exception as e:
         print(f"  ✗ Error processing {file_path}: {e}")
+        traceback.print_exc()
     
     return iocs
 
+print("✓ Mandiant processing function defined with threat actor support")
 
